@@ -2,32 +2,292 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Mini Browser Game</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+  <title>落下ブロックよけゲーム</title>
   <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --accent: #22d3ee;
+      --danger: #f43f5e;
+      --text: #e5e7eb;
+    }
+
+    * {
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+    }
+
     body {
       margin: 0;
-      font-family: sans-serif;
-      background: #111;
-      color: white;
+      min-height: 100vh;
       display: flex;
       justify-content: center;
       align-items: center;
-      height: 100vh;
-      text-align: center;
+      font-family: -apple-system, BlinkMacSystemFont, "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+      background: linear-gradient(180deg, #0b1025, #111827);
+      color: var(--text);
+      overflow: hidden;
+      touch-action: manipulation;
     }
+
+    .game-wrap {
+      width: min(100vw, 430px);
+      height: 100vh;
+      max-height: 100vh;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .hud {
+      background: rgba(17, 24, 39, 0.9);
+      border: 1px solid rgba(148, 163, 184, 0.3);
+      border-radius: 12px;
+      padding: 10px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .stage {
+      position: relative;
+      flex: 1;
+      background: rgba(15, 23, 42, 0.92);
+      border-radius: 14px;
+      border: 1px solid rgba(148, 163, 184, 0.3);
+      overflow: hidden;
+      touch-action: none;
+    }
+
+    .player {
+      position: absolute;
+      width: 52px;
+      height: 16px;
+      background: var(--accent);
+      border-radius: 8px;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      box-shadow: 0 0 16px rgba(34, 211, 238, 0.6);
+    }
+
+    .obstacle {
+      position: absolute;
+      width: 44px;
+      height: 22px;
+      background: var(--danger);
+      border-radius: 6px;
+      box-shadow: 0 0 10px rgba(244, 63, 94, 0.45);
+    }
+
+    .overlay {
+      position: absolute;
+      inset: 0;
+      display: none;
+      justify-content: center;
+      align-items: center;
+      background: rgba(2, 6, 23, 0.78);
+      backdrop-filter: blur(2px);
+      text-align: center;
+      padding: 16px;
+    }
+
+    .overlay.show {
+      display: flex;
+    }
+
+    .card h2 {
+      margin: 0 0 8px;
+      font-size: 30px;
+    }
+
+    .card p {
+      margin: 0 0 14px;
+      font-size: 18px;
+    }
+
     button {
-      font-size: 20px;
-      padding: 12px 24px;
+      font-size: 18px;
+      font-weight: 700;
+      border: none;
       border-radius: 10px;
+      padding: 10px 18px;
+      background: var(--accent);
+      color: #0f172a;
     }
   </style>
 </head>
 <body>
-  <div>
-    <h1>Mini Browser Game</h1>
-    <p>ここにゲームを作っていきます。</p>
-    <button onclick="alert('動作確認OK')">タップ</button>
+  <div class="game-wrap">
+    <div class="hud">
+      <span>Score</span>
+      <span id="score">0</span>
+    </div>
+
+    <div id="stage" class="stage">
+      <div id="player" class="player"></div>
+
+      <div id="gameOver" class="overlay">
+        <div class="card">
+          <h2>Game Over</h2>
+          <p>最終スコア: <span id="finalScore">0</span></p>
+          <button id="retryButton">リトライ</button>
+        </div>
+      </div>
+    </div>
   </div>
+
+  <script>
+    // ===== ゲームの基本要素を取得 =====
+    const stage = document.getElementById('stage');
+    const player = document.getElementById('player');
+    const scoreEl = document.getElementById('score');
+    const gameOverEl = document.getElementById('gameOver');
+    const finalScoreEl = document.getElementById('finalScore');
+    const retryButton = document.getElementById('retryButton');
+
+    // ===== ゲームで使う状態 =====
+    let playerX = 0;
+    let score = 0;
+    let isGameOver = false;
+    let obstacles = [];
+    let obstacleTimer = 0;
+    let animationId = null;
+    let lastTime = 0;
+
+    const PLAYER_SPEED = 0.3; // タップ位置へ追従する速さ（大きいほど速い）
+    const SPAWN_INTERVAL = 700; // 障害物を出す間隔（ミリ秒）
+
+    let targetX = 0;
+
+    // プレイヤーをタップ位置へ動かす（指を動かした時も追従）
+    function setTargetFromTouch(clientX) {
+      const rect = stage.getBoundingClientRect();
+      targetX = clientX - rect.left - player.offsetWidth / 2;
+      const maxX = stage.clientWidth - player.offsetWidth;
+      targetX = Math.max(0, Math.min(targetX, maxX));
+    }
+
+    stage.addEventListener('pointerdown', (e) => {
+      setTargetFromTouch(e.clientX);
+    });
+
+    stage.addEventListener('pointermove', (e) => {
+      if (e.pressure > 0) {
+        setTargetFromTouch(e.clientX);
+      }
+    });
+
+    // 障害物を1つ生成して配列に追加する
+    function createObstacle() {
+      const block = document.createElement('div');
+      block.className = 'obstacle';
+
+      const maxX = stage.clientWidth - 44;
+      const x = Math.random() * maxX;
+
+      block.style.left = `${x}px`;
+      block.style.top = '-24px';
+      stage.appendChild(block);
+
+      obstacles.push({
+        el: block,
+        x,
+        y: -24,
+        speed: 2.2 + Math.random() * 1.6
+      });
+    }
+
+    // 2つの四角形が重なっているかを判定する（当たり判定）
+    function isColliding(a, b) {
+      return (
+        a.left < b.right &&
+        a.right > b.left &&
+        a.top < b.bottom &&
+        a.bottom > b.top
+      );
+    }
+
+    function endGame() {
+      isGameOver = true;
+      finalScoreEl.textContent = Math.floor(score);
+      gameOverEl.classList.add('show');
+      cancelAnimationFrame(animationId);
+    }
+
+    function resetGame() {
+      obstacles.forEach((item) => item.el.remove());
+      obstacles = [];
+
+      score = 0;
+      scoreEl.textContent = '0';
+      isGameOver = false;
+      obstacleTimer = 0;
+      lastTime = performance.now();
+
+      const startX = (stage.clientWidth - player.offsetWidth) / 2;
+      playerX = startX;
+      targetX = startX;
+      player.style.left = `${playerX}px`;
+
+      gameOverEl.classList.remove('show');
+      animationId = requestAnimationFrame(gameLoop);
+    }
+
+    function gameLoop(now) {
+      if (isGameOver) return;
+
+      const delta = now - lastTime;
+      lastTime = now;
+
+      // スコアは経過時間で増える
+      score += delta * 0.01;
+      scoreEl.textContent = Math.floor(score);
+
+      // プレイヤーをタップ目標位置へ少しずつ移動
+      playerX += (targetX - playerX) * PLAYER_SPEED;
+      player.style.left = `${playerX}px`;
+
+      // 一定間隔で障害物を生成
+      obstacleTimer += delta;
+      if (obstacleTimer >= SPAWN_INTERVAL) {
+        createObstacle();
+        obstacleTimer = 0;
+      }
+
+      const playerRect = player.getBoundingClientRect();
+
+      // 障害物を下へ移動し、当たり判定を行う
+      for (let i = obstacles.length - 1; i >= 0; i--) {
+        const item = obstacles[i];
+        item.y += item.speed;
+        item.el.style.top = `${item.y}px`;
+
+        const obstacleRect = item.el.getBoundingClientRect();
+
+        if (isColliding(playerRect, obstacleRect)) {
+          endGame();
+          return;
+        }
+
+        // 画面外へ出た障害物は削除
+        if (item.y > stage.clientHeight + 30) {
+          item.el.remove();
+          obstacles.splice(i, 1);
+        }
+      }
+
+      animationId = requestAnimationFrame(gameLoop);
+    }
+
+    retryButton.addEventListener('click', resetGame);
+
+    // 初期化
+    resetGame();
+  </script>
 </body>
 </html>
